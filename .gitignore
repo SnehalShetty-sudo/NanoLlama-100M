@@ -4,7 +4,9 @@ __pycache__/
 *$py.class
 
 # Project specific exclusions
-data/
+data/*
+!data/.gitkeep
+!data/__init__.py
 checkpoints/
 wandb/
 
