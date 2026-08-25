@@ -1,0 +1,7 @@
+torch
+transformers
+tokenizers
+datasets
+wandb
+gradio
+pytest
