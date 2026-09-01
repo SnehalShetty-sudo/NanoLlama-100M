@@ -112,10 +112,13 @@ def main():
     # Fixed seed for data ordering
     torch.manual_seed(1337)
     
-    print(f"Starting training for {max_steps} steps...")
+    print(f"Starting training for {max_steps} steps...", flush=True)
     start_time = time.time()
     
-    for step in range(max_steps):
+    from tqdm import tqdm
+    pbar = tqdm(range(max_steps), desc=f"Training {args.model_size}")
+    
+    for step in pbar:
         lr = get_lr(step, warmup_steps, max_steps, max_lr, min_lr)
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
@@ -144,7 +147,7 @@ def main():
                     "system/peak_vram_mb": peak_vram,
                     "step": step
                 })
-            print(f"Step {step}/{max_steps} | Loss: {loss.item():.4f} | LR: {lr:.2e} | VRAM: {peak_vram:.1f} MB")
+            pbar.set_postfix({'Loss': f"{loss.item():.4f}", 'LR': f"{lr:.2e}", 'VRAM': f"{peak_vram:.1f}MB"})
 
     total_time = time.time() - start_time
     print(f"Training completed in {total_time:.2f} seconds.")
