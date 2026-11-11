@@ -1,8 +1,9 @@
 import random
+import os
 import torch
 from torch.utils.data import IterableDataset, DataLoader
 from datasets import load_dataset
-from transformers import AutoTokenizer
+from tokenizers import Tokenizer
 
 class RealMixedDataset(IterableDataset):
     """
@@ -20,20 +21,16 @@ class RealMixedDataset(IterableDataset):
         self.tokenizer_name = tokenizer_name
         
     def _init_tokenizer_and_streams(self):
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
-        except Exception:
-            # Fallback to gpt2 if llama-7b tokenizer is inaccessible
-            tokenizer = AutoTokenizer.from_pretrained("gpt2")
-
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token or tokenizer.bos_token
+        # Load custom tokenizer
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        tokenizer_path = os.path.join(base_dir, "tokenizer", "slm_v2_tokenizer.json")
+        tokenizer = Tokenizer.from_file(tokenizer_path)
 
         # 1. FineWeb-Edu (70%)
         fineweb_ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=True)
         
         # 2. StarCoder-Python + Cosmopedia (20%)
-        code_ds = load_dataset("HuggingFaceTB/smollm-corpus", name="python", split="train", streaming=True)
+        code_ds = load_dataset("HuggingFaceTB/smollm-corpus", name="cosmopedia-v2", split="train", streaming=True)
         
         # 3. Wikipedia (10%)
         wiki_ds = load_dataset("wikimedia/wikipedia", "20231101.en", split="train", streaming=True)
@@ -66,9 +63,10 @@ class RealMixedDataset(IterableDataset):
                 continue
 
             # Tokenize text
-            tokens = tokenizer.encode(text, add_special_tokens=False)
-            if tokenizer.eos_token_id is not None:
-                tokens.append(tokenizer.eos_token_id)
+            tokens = tokenizer.encode(text).ids
+            eos_id = tokenizer.token_to_id("<|eos|>")
+            if eos_id is not None:
+                tokens.append(eos_id)
             
             token_buffer.extend(tokens)
 
@@ -77,8 +75,7 @@ class RealMixedDataset(IterableDataset):
                 chunk = token_buffer[: self.seq_len + 1]
                 token_buffer = token_buffer[self.seq_len :]
 
-                # Cap token IDs to model vocab_size (32000)
-                chunk = [t % 32000 for t in chunk]
+                # No need to cap token IDs to model vocab_size as custom tokenizer handles it
                 
                 inputs = torch.tensor(chunk[:-1], dtype=torch.long)
                 targets = torch.tensor(chunk[1:], dtype=torch.long)

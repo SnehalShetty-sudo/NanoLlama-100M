@@ -53,9 +53,32 @@ class SwiGLU(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 
+def precompute_freqs_cis(dim: int, max_seq_len: int, theta: float = 10000.0):
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    t = torch.arange(max_seq_len, device=freqs.device, dtype=torch.float32)
+    freqs = torch.outer(t, freqs)
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+    return freqs_cis
+
+def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
+    ndim = x.ndim
+    assert 0 <= 1 < ndim
+    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
+    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+    return freqs_cis.view(*shape)
+
+def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor):
+    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
+    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
+    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+    return xq_out.type_as(xq), xk_out.type_as(xk)
+
+
 class CausalSelfAttention(nn.Module):
     """Multi-Head Causal Self-Attention with PyTorch Scaled Dot-Product Attention."""
-    def __init__(self, d_model: int, n_heads: int):
+    def __init__(self, d_model: int, n_heads: int, max_seq_len: int = 512):
         super().__init__()
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
         self.d_model = d_model
@@ -64,27 +87,35 @@ class CausalSelfAttention(nn.Module):
 
         self.qkv_proj = nn.Linear(d_model, 3 * d_model, bias=False)
         self.out_proj = nn.Linear(d_model, d_model, bias=False)
+        
+        freqs_cis = precompute_freqs_cis(self.head_dim, max_seq_len)
+        self.register_buffer("freqs_cis", freqs_cis, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, S, D = x.shape
         qkv = self.qkv_proj(x)
         q, k, v = qkv.chunk(3, dim=-1)
 
-        q = q.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
-        k = k.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        q = q.view(B, S, self.n_heads, self.head_dim)
+        k = k.view(B, S, self.n_heads, self.head_dim)
         v = v.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+
+        freqs_cis = self.freqs_cis[:S].to(x.device)
+        q, k = apply_rotary_emb(q, k, freqs_cis)
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
 
         out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         out = out.transpose(1, 2).contiguous().view(B, S, D)
         return self.out_proj(out)
 
-
 class TransformerBlock(nn.Module):
     """Decoder Transformer Layer."""
-    def __init__(self, d_model: int, n_heads: int, d_ff: int):
+    def __init__(self, d_model: int, n_heads: int, d_ff: int, max_seq_len: int = 512):
         super().__init__()
         self.norm1 = RMSNorm(d_model)
-        self.attn = CausalSelfAttention(d_model, n_heads)
+        self.attn = CausalSelfAttention(d_model, n_heads, max_seq_len=max_seq_len)
         self.norm2 = RMSNorm(d_model)
         self.mlp = SwiGLU(d_model, d_ff)
 
@@ -103,6 +134,7 @@ class DecoderTransformer(nn.Module):
         n_layers: int = 11,
         n_heads: int = 12,
         d_ff: int = 2048,
+        max_seq_len: int = 512,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -110,7 +142,7 @@ class DecoderTransformer(nn.Module):
 
         self.embed_tokens = nn.Embedding(vocab_size, d_model)
         self.layers = nn.ModuleList([
-            TransformerBlock(d_model, n_heads, d_ff)
+            TransformerBlock(d_model, n_heads, d_ff, max_seq_len=max_seq_len)
             for _ in range(n_layers)
         ])
         self.norm_final = RMSNorm(d_model)
@@ -249,7 +281,7 @@ def main():
     print("=" * 80)
 
     # Calculate total parameter count
-    raw_model = DecoderTransformer(vocab_size=vocab_size, d_model=d_model, n_layers=n_layers, n_heads=n_heads, d_ff=d_ff)
+    raw_model = DecoderTransformer(vocab_size=vocab_size, d_model=d_model, n_layers=n_layers, n_heads=n_heads, d_ff=d_ff, max_seq_len=args.seq_len)
     total_params = sum(p.numel() for p in raw_model.parameters())
     print(f"Total Model Parameters: {total_params / 1e6:.2f}M")
     print("=" * 80)
@@ -267,7 +299,7 @@ def main():
 
         for b_size in args.batch_sizes:
             # Instantiate fresh model for clean memory layout
-            model = DecoderTransformer(vocab_size=vocab_size, d_model=d_model, n_layers=n_layers, n_heads=n_heads, d_ff=d_ff).to(device)
+            model = DecoderTransformer(vocab_size=vocab_size, d_model=d_model, n_layers=n_layers, n_heads=n_heads, d_ff=d_ff, max_seq_len=args.seq_len).to(device)
 
             if use_compile:
                 try:

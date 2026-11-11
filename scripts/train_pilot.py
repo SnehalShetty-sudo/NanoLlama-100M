@@ -16,12 +16,12 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.benchmark_throughput import DecoderTransformer
 from data.dataset import get_real_dataloader
-from transformers import AutoTokenizer
+from tokenizers import Tokenizer
 
 def generate_text(model, tokenizer, prompt_text, max_new_tokens=50, device='cuda'):
     model.eval()
-    input_ids = tokenizer.encode(prompt_text, return_tensors='pt').to(device)
-    input_ids = input_ids % 32000 # cap to model vocab size
+    tokens = tokenizer.encode(prompt_text).ids
+    input_ids = torch.tensor([tokens], dtype=torch.long).to(device)
     
     with torch.no_grad():
         for _ in range(max_new_tokens):
@@ -30,7 +30,7 @@ def generate_text(model, tokenizer, prompt_text, max_new_tokens=50, device='cuda
             next_token = torch.argmax(next_token_logits, dim=-1).unsqueeze(0).unsqueeze(0)
             input_ids = torch.cat([input_ids, next_token], dim=1)
             
-    decoded = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+    decoded = tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=True)
     return decoded
 
 def get_lr(step, warmup_steps, max_steps, max_lr, min_lr):
@@ -45,10 +45,13 @@ def get_lr(step, warmup_steps, max_steps, max_lr, min_lr):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_size', type=str, choices=['100M', '200M'], required=True)
+    parser.add_argument('--model_size', type=str, choices=['100M', '200M', 'test'], required=True)
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--seq_len', type=int, default=512)
     parser.add_argument('--total_tokens', type=int, default=250_000_000)
+    parser.add_argument('--checkpoint_every', type=int, default=1000, help='Save checkpoint every N steps')
+    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint file to resume from')
+    parser.add_argument('--kill_at_step', type=int, default=-1, help='For testing: kill process after this step')
     args = parser.parse_args()
 
     vocab_size = 32000
@@ -57,8 +60,10 @@ def main():
     # Model Configurations
     if args.model_size == '100M':
         d_model, n_layers, n_heads, d_ff = 768, 11, 12, 2048
-    else:  # 200M
+    elif args.model_size == '200M':
         d_model, n_layers, n_heads, d_ff = 1024, 14, 16, 2752
+    else:  # test
+        d_model, n_layers, n_heads, d_ff = 64, 1, 4, 256
         
     model = DecoderTransformer(
         vocab_size=vocab_size, 
@@ -98,6 +103,16 @@ def main():
     model.train()
     scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
     
+    start_step = 0
+    if args.resume:
+        print(f"Resuming from checkpoint: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        start_step = checkpoint['step'] + 1
+        print(f"Resuming from step {start_step} with previous loss: {checkpoint.get('loss', 'unknown')}")
+
     if device.type == 'cuda':
         torch.cuda.reset_peak_memory_stats()
         
@@ -112,7 +127,7 @@ def main():
     start_time = time.time()
     
     from tqdm import tqdm
-    pbar = tqdm(range(max_steps), desc=f"Training {args.model_size} Real Data")
+    pbar = tqdm(range(start_step, max_steps), initial=start_step, total=max_steps, desc=f"Training {args.model_size} Real Data")
     
     for step in pbar:
         lr = get_lr(step, warmup_steps, max_steps, max_lr, min_lr)
@@ -138,6 +153,24 @@ def main():
         scaler.step(optimizer)
         scaler.update()
         
+        if (step + 1) % args.checkpoint_every == 0:
+            os.makedirs('checkpoints', exist_ok=True)
+            ckpt = {
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
+                'step': step,
+                'loss': loss.item(),
+                'args': args
+            }
+            torch.save(ckpt, f"checkpoints/pilot_{args.model_size}_step{step+1}.pt")
+            torch.save(ckpt, f"checkpoints/pilot_{args.model_size}_latest.pt")
+        
+        if args.kill_at_step > 0 and step == args.kill_at_step:
+            print(f"TEST: Killing at step {step} with loss: {loss.item()}")
+            import sys
+            sys.exit(0)
+            
         if step % 10 == 0:
             peak_vram = torch.cuda.max_memory_allocated() / (1024**2) if device.type == 'cuda' else 0
             if WANDB_AVAILABLE:
@@ -157,16 +190,28 @@ def main():
     
     # Save checkpoint
     os.makedirs('checkpoints', exist_ok=True)
-    checkpoint_path = f"checkpoints/pilot_{args.model_size}.pt"
-    torch.save(model.state_dict(), checkpoint_path)
+    checkpoint_path = f"checkpoints/pilot_{args.model_size}_step{max_steps}.pt"
+    ckpt = {
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scaler_state_dict': scaler.state_dict(),
+        'step': max_steps - 1,
+        'loss': loss.item() if 'loss' in locals() else 0.0,
+        'args': args
+    }
+    torch.save(ckpt, checkpoint_path)
+    torch.save(ckpt, f"checkpoints/pilot_{args.model_size}_latest.pt")
     print(f"Saved checkpoint to {checkpoint_path}")
     
     # Evaluation suite against real prompts
     print("\n--- REAL EVALUATION PROMPT SUITE ---")
-    try:
-        eval_tokenizer = AutoTokenizer.from_pretrained("huggyllama/llama-7b")
-    except Exception:
-        eval_tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tokenizer_path = os.path.join(base_dir, "tokenizer", "slm_v2_tokenizer.json")
+    if os.path.exists(tokenizer_path):
+        eval_tokenizer = Tokenizer.from_file(tokenizer_path)
+    else:
+        print("Warning: Custom tokenizer not found, evaluation skipped.")
+        eval_tokenizer = None
 
     prompts = {
         "Narrative Continuation": "Once upon a time in a distant galaxy, an explorer discovered a hidden planet that",
@@ -174,9 +219,10 @@ def main():
         "Python Code Completion": "def calculate_factorial(n):\n    # Return factorial of n\n    if n == 0 or n == 1:\n        return 1\n    "
     }
     
-    for name, prompt_text in prompts.items():
-        output = generate_text(model, eval_tokenizer, prompt_text, max_new_tokens=40, device=device)
-        print(f"\n[{name}]\nPROMPT: {prompt_text}\nGENERATED: {output}\n")
+    if eval_tokenizer:
+        for name, prompt_text in prompts.items():
+            output = generate_text(model, eval_tokenizer, prompt_text, max_new_tokens=40, device=device)
+            print(f"\n[{name}]\nPROMPT: {prompt_text}\nGENERATED: {output}\n")
         
     if WANDB_AVAILABLE:
         wandb.finish()
