@@ -163,8 +163,18 @@ def main():
                 'loss': loss.item(),
                 'args': args
             }
-            torch.save(ckpt, f"checkpoints/pilot_{args.model_size}_step{step+1}.pt")
-            torch.save(ckpt, f"checkpoints/pilot_{args.model_size}_latest.pt")
+            # Rotate checkpoints: keep only latest and prev to avoid filling Kaggle's 20GB disk
+            latest_path = f"checkpoints/pilot_{args.model_size}_latest.pt"
+            prev_path = f"checkpoints/pilot_{args.model_size}_prev.pt"
+            tmp_path = f"checkpoints/pilot_{args.model_size}_tmp.pt"
+            
+            torch.save(ckpt, tmp_path)
+            if os.path.exists(latest_path):
+                if os.path.exists(prev_path):
+                    os.remove(prev_path)
+                os.rename(latest_path, prev_path)
+            os.rename(tmp_path, latest_path)
+            print(f"\n[Checkpoint] Saved step {step+1} cleanly (Loss: {loss.item():.4f})", flush=True)
         
         if args.kill_at_step > 0 and step == args.kill_at_step:
             print(f"TEST: Killing at step {step} with loss: {loss.item()}")
