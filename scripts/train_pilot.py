@@ -118,10 +118,21 @@ def main():
         
     torch.manual_seed(1337)
     
-    # Initialize Real Data Loader
-    print(f"Loading REAL dataset mixture (70% FineWeb-Edu, 20% Code, 10% Wikipedia)...", flush=True)
-    dataloader = get_real_dataloader(batch_size=args.batch_size, seq_len=args.seq_len, seed=1337)
-    data_iter = iter(dataloader)
+    # Initialize Data Loader
+    if args.model_size == 'test':
+        class DummyDataset(torch.utils.data.IterableDataset):
+            def __iter__(self):
+                while True:
+                    inputs = torch.randint(0, vocab_size, (args.seq_len,), dtype=torch.long)
+                    targets = torch.randint(0, vocab_size, (args.seq_len,), dtype=torch.long)
+                    yield inputs, targets
+        dataloader = torch.utils.data.DataLoader(DummyDataset(), batch_size=args.batch_size)
+        data_iter = iter(dataloader)
+    else:
+        # Initialize Real Data Loader (offset seed on resume to avoid replaying step-0 data)
+        print(f"Loading REAL dataset mixture (70% FineWeb-Edu, 20% Code, 10% Wikipedia)...", flush=True)
+        dataloader = get_real_dataloader(batch_size=args.batch_size, seq_len=args.seq_len, seed=1337 + start_step)
+        data_iter = iter(dataloader)
     
     print(f"Starting real data training for {max_steps} steps...", flush=True)
     start_time = time.time()

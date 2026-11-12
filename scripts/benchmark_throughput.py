@@ -148,8 +148,19 @@ class DecoderTransformer(nn.Module):
         self.norm_final = RMSNorm(d_model)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
 
+        # Initialize weights with standard normal std=0.02
+        self.apply(self._init_weights)
+
         # Tie embeddings
         self.lm_head.weight = self.embed_tokens.weight
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         x = self.embed_tokens(input_ids)

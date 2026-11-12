@@ -15,7 +15,7 @@ def run_test():
     # Run for 10 steps, kill at step 4 (5th step, since 0-indexed)
     print("Starting Run 1 (initial run)...")
     p1 = subprocess.run([
-        'py', 'scripts/train_pilot.py', 
+        sys.executable, 'scripts/train_pilot.py', 
         '--model_size', 'test',
         '--batch_size', '2',
         '--seq_len', '32',
@@ -40,20 +40,20 @@ def run_test():
     loss1 = float(match.group(1))
     
     # Check if checkpoint exists
-    if not os.path.exists('checkpoints/pilot_test_step5.pt'):
-        print("FAIL: Checkpoint pilot_test_step5.pt not found")
+    if not os.path.exists('checkpoints/pilot_test_latest.pt'):
+        print("FAIL: Checkpoint pilot_test_latest.pt not found")
         sys.exit(1)
         
     print(f"Run 1 completed. Saved loss at step 4: {loss1}")
     
     print("Starting Run 2 (Resume)...")
     p2 = subprocess.run([
-        'py', 'scripts/train_pilot.py', 
+        sys.executable, 'scripts/train_pilot.py', 
         '--model_size', 'test',
         '--batch_size', '2',
         '--seq_len', '32',
         '--total_tokens', '640',
-        '--resume', 'checkpoints/pilot_test_step5.pt'
+        '--resume', 'checkpoints/pilot_test_latest.pt'
     ], capture_output=True, text=True, env=dict(os.environ, WANDB_MODE='disabled'))
     
     out2 = p2.stdout
