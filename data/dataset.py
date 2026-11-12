@@ -1,5 +1,6 @@
 import random
 import os
+import time
 import torch
 from torch.utils.data import IterableDataset, DataLoader
 from datasets import load_dataset
@@ -54,9 +55,13 @@ class RealMixedDataset(IterableDataset):
                     text = next(code_iter).get("text", "")
                 else:
                     text = next(wiki_iter).get("text", "")
-            except StopIteration:
-                # Restart stream if exhausted
-                _, fineweb_iter, code_iter, wiki_iter = self._init_tokenizer_and_streams()
+            except (StopIteration, Exception) as e:
+                # Restart stream if exhausted or if transient network drop occurs
+                time.sleep(1)
+                try:
+                    _, fineweb_iter, code_iter, wiki_iter = self._init_tokenizer_and_streams()
+                except Exception:
+                    time.sleep(2)
                 continue
 
             if not text or not text.strip():
