@@ -45,7 +45,7 @@ def get_lr(step, warmup_steps, max_steps, max_lr, min_lr):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_size', type=str, choices=['100M', '200M', 'test'], required=True)
+    parser.add_argument('--model_size', type=str, choices=['10M', '100M', '200M', 'test'], required=True)
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--seq_len', type=int, default=512)
     parser.add_argument('--total_tokens', type=int, default=250_000_000)
@@ -58,7 +58,9 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Model Configurations
-    if args.model_size == '100M':
+    if args.model_size == '10M':
+        d_model, n_layers, n_heads, d_ff = 256, 4, 4, 680
+    elif args.model_size == '100M':
         d_model, n_layers, n_heads, d_ff = 768, 11, 12, 2048
     elif args.model_size == '200M':
         d_model, n_layers, n_heads, d_ff = 1024, 14, 16, 2752

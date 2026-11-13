@@ -7,6 +7,18 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from scripts.benchmark_throughput import DecoderTransformer
 
+def test_10M_parameter_count():
+    model = DecoderTransformer(
+        vocab_size=32000, 
+        d_model=256, 
+        n_layers=4, 
+        n_heads=4, 
+        d_ff=680
+    )
+    total_params = sum(p.numel() for p in model.parameters())
+    # Should be ~11.3M
+    assert 11_000_000 < total_params < 12_000_000, f"Expected ~11.3M, got {total_params}"
+
 def test_100M_parameter_count():
     model = DecoderTransformer(
         vocab_size=32000, 
